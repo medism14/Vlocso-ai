@@ -131,7 +131,7 @@ def get_recommendations(user_id: int, vehicle_type: str = None, n: int = 12) -> 
 @app.get("/")
 async def main():
     return {
-        "Hello world"
+        "Server is running up"
     }
 
 @app.post("/recommend/general/{user_id}")

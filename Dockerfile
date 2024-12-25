@@ -1,6 +1,9 @@
 # Image de base Python
 FROM python:3.9-slim
 
+# Créer un utilisateur non-root
+RUN adduser --system --group app
+
 # Définir le répertoire de travail
 WORKDIR /app
 
@@ -15,8 +18,18 @@ COPY annonces.csv .
 COPY vehicles.csv .
 COPY interactions.csv .
 
+# Changer le propriétaire des fichiers
+RUN chown -R app:app /app
+
+# Utiliser l'utilisateur non-root
+USER app
+
 # Exposer le port utilisé par FastAPI
 EXPOSE 8000
 
+# Variables d'environnement pour la production
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
 # Commande pour démarrer l'application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"] 
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"] 
