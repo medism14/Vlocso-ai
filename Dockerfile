@@ -1,11 +1,20 @@
 # Image de base Python
 FROM python:3.9-slim
 
+# Installation des dépendances système nécessaires
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
 # Créer un utilisateur non-root
 RUN adduser --system --group app
 
 # Définir le répertoire de travail
 WORKDIR /app
+
+# Mettre à jour pip
+RUN pip install --no-cache-dir --upgrade pip
 
 # Copier les fichiers de requirements et installer les dépendances
 COPY requirements.txt .
