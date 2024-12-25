@@ -7,8 +7,8 @@ RUN apt-get update && apt-get install -y \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Créer un utilisateur non-root
-RUN adduser --system --group app
+# Créer un utilisateur non-root avec un répertoire home spécifique
+RUN useradd -m -d /home/app app
 
 # Définir le répertoire de travail
 WORKDIR /app
@@ -20,6 +20,10 @@ RUN pip install --no-cache-dir --upgrade pip
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Créer le répertoire pour les données Surprise et donner les permissions
+RUN mkdir -p /home/app/.surprise_data && \
+    chown -R app:app /home/app/.surprise_data
+
 # Copier les fichiers nécessaires
 COPY main.py .
 COPY svd_model.pkl .
@@ -29,6 +33,9 @@ COPY interactions.csv .
 
 # Changer le propriétaire des fichiers
 RUN chown -R app:app /app
+
+# Définir la variable d'environnement pour Surprise
+ENV SURPRISE_DATA_FOLDER=/home/app/.surprise_data
 
 # Utiliser l'utilisateur non-root
 USER app

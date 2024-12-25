@@ -2,8 +2,13 @@ from fastapi import FastAPI, HTTPException
 import pandas as pd
 import joblib
 import random
+import os
+import surprise
 
 app = FastAPI()
+
+# Configurer le répertoire de données Surprise
+os.environ['SURPRISE_DATA_FOLDER'] = os.environ.get('SURPRISE_DATA_FOLDER', '/home/app/.surprise_data')
 
 # Initialiser les variables globales
 annonces_df = None
