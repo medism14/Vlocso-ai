@@ -203,7 +203,7 @@ async def get_general_recommendations(user_id: int, request: RecommendationReque
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/recommend/cars/{user_id}")
+@app.post("/recommend/voitures/{user_id}")
 async def get_car_recommendations(user_id: int, request: RecommendationRequest):
     """
     Endpoint pour obtenir des recommandations de voitures.
