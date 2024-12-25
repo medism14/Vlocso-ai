@@ -21,6 +21,7 @@ model_svd = None
 
 class RecommendationRequest(BaseModel):
     excludeIds: Optional[List[int]] = []
+    nbAnnonces: Optional[int] = 12
 
 @app.on_event("startup")
 async def load_data():
@@ -35,11 +36,11 @@ async def load_data():
         vehicles_df = pd.read_csv("vehicles.csv")
         interactions_df = pd.read_csv("interactions.csv")
         
-        # Fusion des données
+        # Fusion des données avec sélection optimisée des colonnes
         annonces_vehicles_df = pd.merge(
-            annonces_df, 
-            vehicles_df[['vehicle_id', 'type']], 
-            on='vehicle_id', 
+            annonces_df,
+            vehicles_df[['vehicle_id', 'type', 'mark', 'model', 'category']],
+            on='vehicle_id',
             how='left'
         )
         
@@ -50,141 +51,188 @@ async def load_data():
         print(f"Erreur lors du chargement des données: {str(e)}")
         raise e
 
-def get_recommendations(user_id: int, vehicle_type: str = None, exclude_ids: List[int] = None):
+def get_similar_annonces(annonce, filtered_df, price_range=0.2):
+    """
+    Trouve les annonces similaires basées sur plusieurs critères
+    """
+    price_min = float(annonce['price']) * (1 - price_range)
+    price_max = float(annonce['price']) * (1 + price_range)
+    
+    similar = filtered_df[
+        ((filtered_df['type'] == annonce['type']) & 
+         (filtered_df['price'].between(price_min, price_max))) |
+        ((filtered_df['mark'] == annonce['mark']) & 
+         (filtered_df['type'] == annonce['type'])) |
+        ((filtered_df['model'] == annonce['model']) & 
+         (filtered_df['type'] == annonce['type'])) |
+        ((filtered_df['category'] == annonce['category']) & 
+         (filtered_df['type'] == annonce['type']))
+    ]
+    
+    # Prendre 30% des annonces similaires aléatoirement
+    n_select = max(int(len(similar) * 0.3), 1)
+    return similar.sample(n=min(n_select, len(similar)))
+
+def get_top_interactions(df, interaction_counts, percentage=0.3, min_count=5):
+    """
+    Retourne les meilleures annonces basées sur les interactions
+    """
+    df_with_counts = df.merge(
+        interaction_counts,
+        on='annonce_id',
+        how='left'
+    ).fillna({'count': 0})
+    
+    # Prendre 30% des meilleures annonces
+    top_count = max(int(len(df_with_counts) * percentage), min_count)
+    top_annonces = df_with_counts.nlargest(top_count, 'count')
+    
+    # Retourner un échantillon aléatoire des meilleures annonces
+    return top_annonces.sample(frac=1)
+
+def get_recommendations(user_id: int, vehicle_type: str = None, exclude_ids: List[int] = None, nb_annonces: int = 12):
     if exclude_ids is None:
         exclude_ids = []
-    
+        
     try:
+        # Filtrage initial des annonces
+        filtered_df = annonces_vehicles_df[~annonces_vehicles_df['annonce_id'].isin(exclude_ids)]
+        
         if vehicle_type:
-            filtered_df = annonces_vehicles_df[annonces_vehicles_df['type'] == vehicle_type]
-        else:
-            filtered_df = annonces_vehicles_df
-
-        filtered_df = filtered_df[~filtered_df['annonce_id'].isin(exclude_ids)]
-        
-        # Si moins de 12 annonces disponibles après filtrage, retourner une liste vide
-        if len(filtered_df) < 12:
+            filtered_df = filtered_df[filtered_df['type'] == vehicle_type]
+            
+        if len(filtered_df) < nb_annonces:
             return []
             
+        # Obtenir les interactions de l'utilisateur
         user_interactions = interactions_df[interactions_df['user_id'] == user_id]
-        interaction_count = len(user_interactions)
+        interaction_counts = interactions_df.groupby('annonce_id').size().reset_index(name='count')
         
-        # Cas 1: Aucune interaction - Prendre les 30% des annonces avec le plus d'interactions et en sélectionner 12 au hasard
-        if len(user_interactions) == 0:
-            # Compter le nombre d'interactions par annonce
-            interaction_counts = interactions_df.groupby('annonce_id').size().reset_index(name='count')
+        # Pour les recommandations générales, assurer une diversité des types
+        if vehicle_type is None:
+            # Cas 1: Aucune interaction - Sélectionner aléatoirement parmi les plus populaires
+            if len(user_interactions) == 0:
+                top_annonces = get_top_interactions(filtered_df, interaction_counts)
+                voitures = top_annonces[top_annonces['type'] == 'Voiture']['annonce_id'].tolist()
+                motos = top_annonces[top_annonces['type'] == 'Moto']['annonce_id'].tolist()
+                
+                # Mélanger les listes
+                random.shuffle(voitures)
+                random.shuffle(motos)
+                
+                # Répartir équitablement entre voitures et motos
+                voitures_count = nb_annonces // 2
+                motos_count = nb_annonces - voitures_count
+                
+                voitures = voitures[:voitures_count]
+                motos = motos[:motos_count]
+                
+                # Mélanger l'ordre des types
+                recommendations = voitures + motos
+                random.shuffle(recommendations)
+                
+                return recommendations
+                
+            # Cas 2: Peu d'interactions (1-3)
+            if len(user_interactions) <= 3:
+                last_annonce = filtered_df[filtered_df['annonce_id'] == user_interactions.iloc[-1]['annonce_id']].iloc[0]
+                similar_annonces = get_similar_annonces(last_annonce, filtered_df)
+                similar_annonces = similar_annonces[~similar_annonces['annonce_id'].isin(user_interactions['annonce_id'])]
+                
+                if len(similar_annonces) >= nb_annonces:
+                    return similar_annonces['annonce_id'].tolist()[:nb_annonces]
+                    
+                # Si pas assez d'annonces similaires, compléter avec des annonces populaires
+                top_annonces = get_top_interactions(filtered_df, interaction_counts)
+                remaining = nb_annonces - len(similar_annonces)
+                recommendations = similar_annonces['annonce_id'].tolist()
+                recommendations.extend(top_annonces['annonce_id'].tolist()[:remaining])
+                return recommendations
             
-            # Joindre avec filtered_df pour avoir les annonces filtrées avec leur nombre d'interactions
-            filtered_with_counts = filtered_df.merge(
-                interaction_counts,
-                on='annonce_id',
-                how='left'
-            ).fillna({'count': 0})
+            # Cas 3: Plusieurs interactions - Utiliser SVD
+            viewed_annonces = set(user_interactions['annonce_id'])
+            available_annonces = set(filtered_df['annonce_id']) - viewed_annonces - set(exclude_ids)
             
-            # Prendre les 30% des annonces avec le plus d'interactions
-            top_count = int(len(filtered_with_counts) * 0.3)
-            top_annonces = filtered_with_counts.nlargest(top_count, 'count')
-            
-            # Pour chaque cas, vérifier s'il y a assez d'annonces
-            if len(top_annonces) < 12:
+            if len(available_annonces) < nb_annonces:
                 return []
-            
-            return random.sample(top_annonces['annonce_id'].tolist(), min(12, len(top_annonces)))
-            
-        # Cas 2: Très peu d'interactions (1-3)
-        if interaction_count <= 3:
-            # Compter le nombre d'interactions par annonce
-            interaction_counts = interactions_df.groupby('annonce_id').size().reset_index(name='count')
-            
-            # Récupérer la dernière annonce consultée
-            last_interactions = user_interactions.sort_values('interaction_date', ascending=False)
-            last_annonce_id = last_interactions.iloc[0]['annonce_id']
-            last_annonce = filtered_df[filtered_df['annonce_id'] == last_annonce_id]
-            
-            if not last_annonce.empty:
-                annonce = last_annonce.iloc[0]
                 
-                # Filtrer les annonces similaires
-                similar_annonces = filtered_df[
-                    (filtered_df['type'] == annonce['type']) |
-                    (filtered_df['mark'] == annonce['mark']) |
-                    (filtered_df['model'] == annonce['model']) |
-                    (filtered_df['category'] == annonce['category']) |
-                    (
-                        (filtered_df['price'].between(
-                            float(annonce['price']) * 0.8, 
-                            float(annonce['price']) * 1.2
-                        )) &
-                        (filtered_df['type'] == annonce['type'])
-                    )
-                ]
-                
-                # Joindre avec le nombre d'interactions
-                similar_with_counts = similar_annonces.merge(
-                    interaction_counts,
-                    on='annonce_id',
-                    how='left'
-                ).fillna({'count': 0})
-                
-                # Exclure les annonces déjà vues
-                viewed_annonces = user_interactions['annonce_id'].unique()
-                similar_with_counts = similar_with_counts[~similar_with_counts['annonce_id'].isin(viewed_annonces)]
-                
-                # Prendre les 30% des annonces similaires avec le plus d'interactions
-                top_count = int(len(similar_with_counts) * 0.3)
-                top_similar = similar_with_counts.nlargest(top_count, 'count')
-                
-                if len(top_similar) >= 12:
-                    return random.sample(top_similar['annonce_id'].tolist(), 12)
-                else:
-                    return top_similar['annonce_id'].tolist()
+            # Prédictions SVD avec batch processing
+            predictions = []
+            batch_size = 1000
+            annonces_list = list(available_annonces)
             
-            # Si pas d'annonce similaire trouvée, utiliser la même logique que le cas 1
-            filtered_with_counts = filtered_df.merge(
-                interaction_counts,
-                on='annonce_id',
-                how='left'
-            ).fillna({'count': 0})
+            for i in range(0, len(annonces_list), batch_size):
+                batch = annonces_list[i:i + batch_size]
+                batch_predictions = model_svd.test([(user_id, annonce_id, 0) for annonce_id in batch])
+                predictions.extend(batch_predictions)
+                
+            # Sélectionner les 30% meilleures prédictions
+            top_predictions = sorted(predictions, key=lambda x: x.est, reverse=True)[:int(len(predictions) * 0.3)]
             
-            top_count = int(len(filtered_with_counts) * 0.3)
-            top_annonces = filtered_with_counts.nlargest(top_count, 'count')
-            return random.sample(top_annonces['annonce_id'].tolist(), min(12, len(top_annonces)))
-        
-        # Cas 3: Plusieurs interactions - utiliser le modèle SVD
-        user_annonces = user_interactions['annonce_id'].unique()
-        all_annonces = filtered_df['annonce_id'].unique()
-        annonces_to_predict = list(set(all_annonces) - set(user_annonces) - set(exclude_ids))
-        
-        if not annonces_to_predict:
-            top_count = int(len(filtered_df) * 0.3)
-            top_annonces = filtered_df.merge(
-                interaction_counts,
-                on='annonce_id',
-                how='left'
-            ).fillna({'count': 0}).nlargest(top_count, 'count')
-            return random.sample(top_annonces['annonce_id'].tolist(), min(12, len(top_annonces)))
-        
-        # Pour le cas des prédictions SVD
-        if len(annonces_to_predict) < 12:
-            return []
+            # Séparer par type et mélanger
+            voitures = [int(p.iid) for p in top_predictions if filtered_df[filtered_df['annonce_id'] == int(p.iid)]['type'].iloc[0] == 'Voiture']
+            motos = [int(p.iid) for p in top_predictions if filtered_df[filtered_df['annonce_id'] == int(p.iid)]['type'].iloc[0] == 'Moto']
             
-        # Prédictions avec le modèle
-        predictions = model_svd.test([(user_id, annonce_id, 0) for annonce_id in annonces_to_predict])
-        sorted_predictions = sorted(predictions, key=lambda x: x.est, reverse=True)
-        
-        # Prendre les 30% meilleures prédictions
-        top_count = int(len(sorted_predictions) * 0.3)
-        top_predictions = sorted_predictions[:top_count]
-        
-        # Sélectionner 12 prédictions au hasard parmi les meilleures
-        selected_predictions = random.sample(top_predictions, min(12, len(top_predictions)))
-        recommendations = [int(pred.iid) for pred in selected_predictions]
-        
-        return recommendations[:12]
-        
+            random.shuffle(voitures)
+            random.shuffle(motos)
+            
+            # Répartir équitablement
+            voitures_count = nb_annonces // 2
+            motos_count = nb_annonces - voitures_count
+            
+            voitures = voitures[:voitures_count]
+            motos = motos[:motos_count]
+            
+            # Mélanger l'ordre des types
+            recommendations = voitures + motos
+            random.shuffle(recommendations)
+            
+            return recommendations
+            
+        else:
+            # Pour les recommandations spécifiques à un type
+            return get_recommendations_by_type(user_id, filtered_df, user_interactions, interaction_counts, nb_annonces)
+            
     except Exception as e:
         print(f"Erreur lors de la génération des recommandations: {str(e)}")
         return []
+
+def get_recommendations_by_type(user_id, filtered_df, user_interactions, interaction_counts, nb_annonces):
+    """
+    Fonction auxiliaire pour les recommandations spécifiques à un type
+    """
+    if len(user_interactions) == 0:
+        top_annonces = get_top_interactions(filtered_df, interaction_counts)
+        return random.sample(top_annonces['annonce_id'].tolist()[:int(len(top_annonces)*0.3)], nb_annonces)
+        
+    if len(user_interactions) <= 3:
+        last_annonce = filtered_df[filtered_df['annonce_id'] == user_interactions.iloc[-1]['annonce_id']].iloc[0]
+        similar_annonces = get_similar_annonces(last_annonce, filtered_df)
+        similar_annonces = similar_annonces[~similar_annonces['annonce_id'].isin(user_interactions['annonce_id'])]
+        
+        if len(similar_annonces) >= nb_annonces:
+            return random.sample(similar_annonces['annonce_id'].tolist(), nb_annonces)
+            
+        top_annonces = get_top_interactions(filtered_df, interaction_counts)
+        return random.sample(top_annonces['annonce_id'].tolist()[:int(len(top_annonces)*0.3)], nb_annonces)
+        
+    viewed_annonces = set(user_interactions['annonce_id'])
+    available_annonces = set(filtered_df['annonce_id']) - viewed_annonces
+    
+    predictions = []
+    batch_size = 1000
+    annonces_list = list(available_annonces)
+    
+    for i in range(0, len(annonces_list), batch_size):
+        batch = annonces_list[i:i + batch_size]
+        batch_predictions = model_svd.test([(user_id, annonce_id, 0) for annonce_id in batch])
+        predictions.extend(batch_predictions)
+        
+    # Sélectionner aléatoirement parmi les 30% meilleures prédictions
+    top_predictions = sorted(predictions, key=lambda x: x.est, reverse=True)[:int(len(predictions) * 0.3)]
+    selected_predictions = random.sample(top_predictions, nb_annonces)
+    
+    return [int(pred.iid) for pred in selected_predictions]
 
 @app.get("/")
 async def main():
@@ -198,7 +246,7 @@ async def get_general_recommendations(user_id: int, request: RecommendationReque
     Endpoint pour obtenir des recommandations générales.
     """
     try:
-        recommendations = get_recommendations(user_id, exclude_ids=request.excludeIds)
+        recommendations = get_recommendations(user_id, exclude_ids=request.excludeIds, nb_annonces=request.nbAnnonces)
         return recommendations
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -209,7 +257,7 @@ async def get_car_recommendations(user_id: int, request: RecommendationRequest):
     Endpoint pour obtenir des recommandations de voitures.
     """
     try:
-        recommendations = get_recommendations(user_id, vehicle_type='Voiture', exclude_ids=request.excludeIds)
+        recommendations = get_recommendations(user_id, vehicle_type='Voiture', exclude_ids=request.excludeIds, nb_annonces=request.nbAnnonces)
         return recommendations
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -220,7 +268,7 @@ async def get_moto_recommendations(user_id: int, request: RecommendationRequest)
     Endpoint pour obtenir des recommandations de motos.
     """
     try:
-        recommendations = get_recommendations(user_id, vehicle_type='Moto', exclude_ids=request.excludeIds)
+        recommendations = get_recommendations(user_id, vehicle_type='Moto', exclude_ids=request.excludeIds, nb_annonces=request.nbAnnonces)
         return recommendations
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
