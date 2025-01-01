@@ -98,6 +98,9 @@ def get_recommendations(user_id: int, vehicle_type: str = None, exclude_ids: Lis
         # Filtrage initial des annonces
         filtered_df = annonces_vehicles_df[~annonces_vehicles_df['annonce_id'].isin(exclude_ids)]
         
+        # Exclure les annonces de l'utilisateur
+        filtered_df = filtered_df[filtered_df['user_id'] != user_id]
+        
         if vehicle_type:
             filtered_df = filtered_df[filtered_df['type'] == vehicle_type]
             
